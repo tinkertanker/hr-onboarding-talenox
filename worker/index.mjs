@@ -50,11 +50,31 @@ const corsHeaders = (request, env) => {
   };
 };
 
+// Counts bytes as they arrive: chunked requests have no Content-Length.
 const readBody = async (request) => {
   const declaredLength = Number(request.headers.get('Content-Length') || 0);
   if (declaredLength > MAX_BODY_BYTES) return null;
-  const body = await request.text();
-  return new TextEncoder().encode(body).byteLength > MAX_BODY_BYTES ? null : body;
+  if (!request.body) return '';
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    // Past the limit, keep draining without storing so memory stays bounded.
+    // (Cancelling the stream broke the next request on the same connection in
+    // wrangler dev.)
+    if (total <= MAX_BODY_BYTES) chunks.push(value);
+  }
+  if (total > MAX_BODY_BYTES) return null;
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
 };
 
 // Function-style handlers may set their own CORS headers; the Worker owns CORS.
@@ -148,15 +168,14 @@ export default {
   // max_batch_size is 1 and max_concurrency is 1, so submissions run one at a
   // time and employee ID allocation cannot race.
   async queue(batch, env) {
+    // A missing key is a configuration error: throw so the queue retries
+    // rather than acking (and losing) submissions.
+    const key = protectionKey(env);
     for (const message of batch.messages) {
       const requestId = message.body && message.body.requestId;
       let submission;
       try {
-        submission = await dataProtection.openJson(
-          message.body.sealed,
-          protectionKey(env),
-          QUEUE_CONTEXT
-        );
+        submission = await dataProtection.openJson(message.body.sealed, key, QUEUE_CONTEXT);
       } catch (error) {
         // Retrying cannot help, and there is no readable address to notify.
         console.error(`[${requestId}] Discarding unreadable onboarding message: ${error.message}`);

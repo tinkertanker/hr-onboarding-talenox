@@ -75,3 +75,40 @@ test('accepted submissions are queued encrypted and fail visibly if queueing fai
   assert.equal((await submit(missingKey)).status, 503);
   assert.equal(missingKey.sent.length, 0);
 });
+
+const streamRequest = (chunks) => new Request(`${ORIGIN}/api/submit-onboarding`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  duplex: 'half',
+  body: new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      controller.close();
+    }
+  })
+});
+
+test('the body limit applies to streamed bodies without Content-Length', async () => {
+  const env = makeEnv();
+  const oversized = streamRequest(Array.from({ length: 11 }, () => new Uint8Array(10 * 1024).fill(32)));
+  assert.equal(oversized.headers.get('Content-Length'), null);
+  assert.equal((await worker.fetch(oversized, env)).status, 413);
+
+  // A multi-byte character split across chunks must still decode correctly.
+  const bytes = new TextEncoder().encode(JSON.stringify({ ...form, fullName: 'Zoë Tan' }));
+  const split = bytes.indexOf(0xc3) + 1;
+  const accepted = await worker.fetch(streamRequest([bytes.slice(0, split), bytes.slice(split)]), env);
+  assert.equal(accepted.status, 202);
+  const opened = await dataProtection.openJson(env.sent[0].sealed, KEY, 'onboarding-queue');
+  assert.equal(opened.formData.fullName, 'Zoë Tan');
+});
+
+test('the queue consumer leaves messages for retry when the key is missing', async () => {
+  let acked = false;
+  const batch = { messages: [{ body: { requestId: 'r1', sealed: 'x.y' }, ack: () => { acked = true; } }] };
+  await assert.rejects(worker.queue(batch, {}), /DATA_PROTECTION_KEY/);
+  assert.equal(acked, false);
+
+  await worker.queue(batch, { DATA_PROTECTION_KEY: KEY });
+  assert.equal(acked, true);
+});

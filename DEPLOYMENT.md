@@ -36,9 +36,11 @@ account and each step, and do not print secret values.
    `v1` runs on the first deploy.
 5. Domain: `wrangler.jsonc` attaches `hr-onboarding.tk.sg` (zone `tk.sg`, same
    account) as a custom domain. The hostname has no DNS record of its own; it
-   previously reached the Docker server through the `*.tk.sg` wildcard. To roll back,
-   remove the custom domain (Workers > hr-onboarding > Domains, or comment out
-   `routes` and redeploy) and the wildcard routes traffic to the server again.
+   previously reached the Docker server through the `*.tk.sg` wildcard. Rolling back
+   to that server only works while it is up: first confirm its `/api/health` and
+   configuration, then remove the custom domain (Workers > hr-onboarding > Domains,
+   or comment out `routes` and redeploy) so the wildcard routes traffic to it. If the
+   server is down, roll back the Worker instead (`npx wrangler rollback`).
 6. Check `/` and `/api/health` only. Do not submit test data to production.
 
 ## Docker / Express (current server)
