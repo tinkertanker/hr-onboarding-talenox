@@ -40,7 +40,9 @@ account and each step, and do not print secret values.
    to that server only works while it is up: first confirm its `/api/health` and
    configuration, then remove the custom domain (Workers > hr-onboarding > Domains,
    or comment out `routes` and redeploy) so the wildcard routes traffic to it. If the
-   server is down, roll back the Worker instead (`npx wrangler rollback`).
+   server is down, roll back the Worker instead: pick a known-good version from
+   `npx wrangler deployments list` and run `npx wrangler rollback <version-id>`.
+   Versions from before a Durable Object migration may not be eligible.
 6. Check `/` and `/api/health` only. Do not submit test data to production.
 
 ## Docker / Express (current server)

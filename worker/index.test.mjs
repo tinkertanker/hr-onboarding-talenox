@@ -103,6 +103,17 @@ test('the body limit applies to streamed bodies without Content-Length', async (
   assert.equal(opened.formData.fullName, 'Zoë Tan');
 });
 
+test('an oversized body that never ends is rejected once the drain bound is reached', async () => {
+  const chunk = new Uint8Array(64 * 1024).fill(32);
+  const request = new Request(`${ORIGIN}/api/submit-onboarding`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    duplex: 'half',
+    body: new ReadableStream({ pull(controller) { controller.enqueue(chunk); } })
+  });
+  assert.equal((await worker.fetch(request, makeEnv())).status, 413);
+});
+
 test('the queue consumer leaves messages for retry when the key is missing', async () => {
   let acked = false;
   const batch = { messages: [{ body: { requestId: 'r1', sealed: 'x.y' }, ack: () => { acked = true; } }] };

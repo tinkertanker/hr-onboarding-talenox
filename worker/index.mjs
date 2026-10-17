@@ -8,6 +8,7 @@ import dataProtection from '../backend/data-protection.js';
 import { countStoredRows, createSqlStores } from './sql-store.mjs';
 
 const MAX_BODY_BYTES = 100 * 1024; // Matches express.json()'s default limit
+const MAX_DRAIN_BYTES = 1024 * 1024;
 const STATE_CLEANUP_INTERVAL_MS = 15 * 60 * 1000;
 const QUEUE_CONTEXT = 'onboarding-queue';
 
@@ -62,9 +63,13 @@ const readBody = async (request) => {
     const { done, value } = await reader.read();
     if (done) break;
     total += value.byteLength;
-    // Past the limit, keep draining without storing so memory stays bounded.
-    // (Cancelling the stream broke the next request on the same connection in
-    // wrangler dev.)
+    // Past the limit, drain without storing so ordinary oversized requests end
+    // cleanly (cancelling broke the next request on the connection in wrangler
+    // dev), but stop a body that keeps going.
+    if (total > MAX_DRAIN_BYTES) {
+      await reader.cancel();
+      return null;
+    }
     if (total <= MAX_BODY_BYTES) chunks.push(value);
   }
   if (total > MAX_BODY_BYTES) return null;
