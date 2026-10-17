@@ -551,8 +551,10 @@ const transformForTalenox = async (formData) => {
   };
 };
 
-// Main handler function for background processing
-exports.handler = async (event) => {
+// Main handler function for background processing.
+// `dispatch(formData, requestId)` hands accepted submissions to durable background
+// processing (the Cloudflare queue). Without it, processing runs in this process.
+exports.handler = async (event, { dispatch } = {}) => {
   // Handle CORS preflight
   if (event.httpMethod === 'OPTIONS') {
     return {
@@ -607,11 +609,27 @@ exports.handler = async (event) => {
     // Return 202 Accepted immediately for background processing
     console.log(`[${requestId}] Accepted submission for background processing:`, redactSensitiveData(formData));
     
-    // Process in background after returning (this runs up to 15 minutes)
     // Failure emails (HR + employee) are sent inside processOnboarding — once only
-    processOnboarding(formData, requestId).catch(error => {
-      console.error(`[${requestId}] Background processing failed:`, error);
-    });
+    if (dispatch) {
+      try {
+        await dispatch(formData, requestId);
+      } catch (error) {
+        console.error(`[${requestId}] Could not queue submission:`, error.message);
+        return {
+          statusCode: 503,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            error: 'Submission not received',
+            details: 'We could not accept your submission right now. Please try again in a few minutes, or contact HR at hr.onboarding@tk.sg.',
+            requestId
+          })
+        };
+      }
+    } else {
+      processOnboarding(formData, requestId).catch(error => {
+        console.error(`[${requestId}] Background processing failed:`, error);
+      });
+    }
     
     // Return immediately - client gets this response right away
     return {
@@ -754,6 +772,8 @@ async function processOnboarding(formData, requestId) {
     throw error;
   }
 }
+
+exports.processOnboarding = processOnboarding;
 
 exports._testing = {
   redactSensitiveData,

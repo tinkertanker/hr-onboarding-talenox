@@ -1,0 +1,54 @@
+// Cloudflare Workers configuration. See DEPLOYMENT.md before deploying:
+// `wrangler deploy` is an external write and needs explicit approval.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hr-onboarding",
+  "main": "worker/index.mjs",
+  "compatibility_date": "2025-09-01",
+  // nodejs_compat provides node:crypto, Buffer and a populated process.env.
+  "compatibility_flags": ["nodejs_compat"],
+  "alias": { "@react-email/render": "./worker/no-react-email.mjs" },
+
+  // No public URL until the custom domain is chosen at cutover (DEPLOYMENT.md).
+  "workers_dev": false,
+  "preview_urls": false,
+  // "routes": [{ "pattern": "hr-onboarding.tk.sg", "custom_domain": true }],
+
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    // The Worker runs first so it can redirect HTTP to HTTPS for every path.
+    "run_worker_first": true
+  },
+
+  "durable_objects": {
+    "bindings": [{ "name": "PARTICULARS_STATE", "class_name": "ParticularsState" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ParticularsState"] }],
+
+  "queues": {
+    "producers": [{ "binding": "ONBOARDING_QUEUE", "queue": "hr-onboarding-submissions" }],
+    "consumers": [
+      {
+        "queue": "hr-onboarding-submissions",
+        "max_batch_size": 1,
+        "max_concurrency": 1,
+        // Only platform crashes are retried: handled failures are acked after
+        // processOnboarding emails HR. A retry after a partial write is caught by
+        // the existing-employee check and reported as a duplicate.
+        "max_retries": 2,
+        "retry_delay": 60
+      }
+    ]
+  },
+
+  // Persistent Workers Logs are off: even redacted logs contain names and
+  // emails. Use `wrangler tail` for live logs.
+  "observability": { "enabled": false },
+
+  "vars": {
+    "TALENOX_API_URL": "https://api.talenox.com/api/v2"
+  }
+  // Secrets (wrangler secret put): TALENOX_API_KEY, RESEND_API_KEY, NOTIFY_EMAIL,
+  // FROM_EMAIL, DATA_PROTECTION_KEY. Optional: ALLOWED_ORIGINS for cross-origin callers.
+}

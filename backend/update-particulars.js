@@ -1,10 +1,18 @@
 // Email-verified updates for existing Talenox employees.
 //
-// OTP and verified-update sessions are held in memory. This deployment must
-// remain single-process unless these stores are replaced with shared storage.
+// OTP, session, cooldown and rate-limit state lives in Map-like stores. Express
+// uses in-memory Maps, so it must stay single-process. The Cloudflare Worker
+// routes every request through one Durable Object that swaps in persistent
+// stores (see worker/particulars-state.js).
+//
+// Stored state is minimised because the Durable Object persists it: NRIC/FIN,
+// IP and token keys are keyed hashes, OTPs are keyed hashes, and particulars
+// snapshots are encrypted (session snapshots with a key that also needs the
+// client's update token, which is never stored).
 
 const crypto = require('crypto');
 const { Resend } = require('resend');
+const dataProtection = require('./data-protection');
 
 const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_MAX_ATTEMPTS = 5;
@@ -28,16 +36,21 @@ const ALLOWED_BANKS = new Set([
   'Trust Bank Singapore'
 ]);
 
-const otpStore = new Map();
-const verifiedSessionStore = new Map();
-const cooldownStore = new Map();
-const ipRequestLog = new Map();
+const createMemoryStores = () => ({
+  otp: new Map(),
+  sessions: new Map(),
+  cooldowns: new Map(),
+  ipRequests: new Map()
+});
+let stores = createMemoryStores();
 
 const defaultRuntime = {
-  fetch: (...args) => global.fetch(...args),
+  fetch: (...args) => globalThis.fetch(...args),
   sendEmail: null,
   now: () => Date.now(),
-  upstreamTimeoutMs: UPSTREAM_TIMEOUT_MS
+  upstreamTimeoutMs: UPSTREAM_TIMEOUT_MS,
+  // Persistent stores need a stable key; in-memory stores may use a per-process one.
+  requireProtectionKey: false
 };
 const runtime = { ...defaultRuntime };
 
@@ -111,7 +124,28 @@ const redactSensitiveData = (data) => {
   return redacted;
 };
 
-const hashOtp = (code) => crypto.createHash('sha256').update(String(code)).digest('hex');
+let processProtectionKey = null;
+const getProtectionKey = () => {
+  const configured = process.env.DATA_PROTECTION_KEY;
+  if (configured && configured.length >= 32) return configured;
+  if (configured || runtime.requireProtectionKey) return null;
+  if (!processProtectionKey) processProtectionKey = crypto.randomBytes(32);
+  return processProtectionKey;
+};
+
+const keyedHash = (purpose, value) => crypto
+  .createHmac('sha256', getProtectionKey())
+  .update(`${purpose}:${value}`)
+  .digest('hex');
+const nricKey = (nric) => keyedHash('nric', nric);
+const ipKey = (ip) => keyedHash('ip', ip);
+const tokenKey = (token) => crypto.createHash('sha256').update(String(token)).digest('hex');
+const hashOtp = (subjectKey, code) => keyedHash('otp', `${subjectKey}:${code}`);
+
+const sealJson = (value, context) =>
+  dataProtection.sealJson(value, getProtectionKey(), context);
+const openJson = (sealed, context) =>
+  dataProtection.openJson(sealed, getProtectionKey(), context);
 
 const otpHashesEqual = (a, b) => {
   try {
@@ -135,21 +169,21 @@ const maskEmail = (email) => {
 const cleanupExpiredState = () => {
   const currentTime = now();
 
-  for (const [key, session] of otpStore.entries()) {
-    if (session.expiresAt <= currentTime) otpStore.delete(key);
+  for (const [key, session] of stores.otp.entries()) {
+    if (session.expiresAt <= currentTime) stores.otp.delete(key);
   }
-  for (const [token, session] of verifiedSessionStore.entries()) {
-    if (session.expiresAt <= currentTime) verifiedSessionStore.delete(token);
+  for (const [key, session] of stores.sessions.entries()) {
+    if (session.expiresAt <= currentTime) stores.sessions.delete(key);
   }
-  for (const [key, lastSentAt] of cooldownStore.entries()) {
+  for (const [key, lastSentAt] of stores.cooldowns.entries()) {
     if (currentTime - lastSentAt > OTP_REQUEST_COOLDOWN_MS * 60) {
-      cooldownStore.delete(key);
+      stores.cooldowns.delete(key);
     }
   }
-  for (const [ip, timestamps] of ipRequestLog.entries()) {
+  for (const [key, timestamps] of stores.ipRequests.entries()) {
     const fresh = timestamps.filter((timestamp) => currentTime - timestamp < IP_WINDOW_MS);
-    if (fresh.length) ipRequestLog.set(ip, fresh);
-    else ipRequestLog.delete(ip);
+    if (fresh.length) stores.ipRequests.set(key, fresh);
+    else stores.ipRequests.delete(key);
   }
 };
 
@@ -162,19 +196,20 @@ const getClientIp = (event) => {
 
 const checkIpRateLimit = (ip) => {
   const currentTime = now();
-  const timestamps = (ipRequestLog.get(ip) || [])
+  const key = ipKey(ip);
+  const timestamps = (stores.ipRequests.get(key) || [])
     .filter((timestamp) => currentTime - timestamp < IP_WINDOW_MS);
   if (timestamps.length >= IP_MAX_REQUESTS) {
-    ipRequestLog.set(ip, timestamps);
+    stores.ipRequests.set(key, timestamps);
     return false;
   }
   timestamps.push(currentTime);
-  ipRequestLog.set(ip, timestamps);
+  stores.ipRequests.set(key, timestamps);
   return true;
 };
 
-const isInCooldown = (nric) => {
-  const lastSentAt = cooldownStore.get(nric);
+const isInCooldown = (subjectKey) => {
+  const lastSentAt = stores.cooldowns.get(subjectKey);
   return Boolean(lastSentAt && now() - lastSentAt < OTP_REQUEST_COOLDOWN_MS);
 };
 
@@ -544,21 +579,21 @@ Please review the employee record and contact the employee if needed.`
   }).then(() => true);
 };
 
-const consumeOtp = (nric, verificationCode) => {
+const consumeOtp = (subjectKey, verificationCode) => {
   cleanupExpiredState();
-  const session = otpStore.get(nric);
+  const session = stores.otp.get(subjectKey);
   if (!session) return null;
 
-  const codeMatches = otpHashesEqual(hashOtp(verificationCode), session.codeHash);
+  const codeMatches = otpHashesEqual(hashOtp(subjectKey, verificationCode), session.codeHash);
   if (!codeMatches) {
     session.attempts += 1;
-    if (session.attempts >= OTP_MAX_ATTEMPTS) otpStore.delete(nric);
-    else otpStore.set(nric, session);
+    if (session.attempts >= OTP_MAX_ATTEMPTS) stores.otp.delete(subjectKey);
+    else stores.otp.set(subjectKey, session);
     return null;
   }
 
   // This synchronous check-and-delete makes a correct code single-use.
-  otpStore.delete(nric);
+  stores.otp.delete(subjectKey);
   return session;
 };
 
@@ -586,13 +621,18 @@ exports.requestCodeHandler = async (event) => {
     console.error(`[${requestId}] Email service not configured`);
     return jsonResponse(500, { error: 'Configuration error' });
   }
+  if (!getProtectionKey()) {
+    console.error(`[${requestId}] DATA_PROTECTION_KEY missing or shorter than 32 characters`);
+    return jsonResponse(500, { error: 'Configuration error' });
+  }
 
   cleanupExpiredState();
+  const subjectKey = nricKey(nric);
   const clientIp = getClientIp(event);
-  if (!checkIpRateLimit(clientIp) || isInCooldown(nric)) {
+  if (!checkIpRateLimit(clientIp) || isInCooldown(subjectKey)) {
     return jsonResponse(200, genericSuccess);
   }
-  cooldownStore.set(nric, now());
+  stores.cooldowns.set(subjectKey, now());
 
   let employee;
   try {
@@ -621,11 +661,12 @@ exports.requestCodeHandler = async (event) => {
     return jsonResponse(200, genericSuccess);
   }
 
-  otpStore.set(nric, {
-    codeHash: hashOtp(code),
+  stores.otp.set(subjectKey, {
+    codeHash: hashOtp(subjectKey, code),
     expiresAt: now() + OTP_TTL_MS,
     attempts: 0,
-    employee
+    employeeId: employee.id,
+    sealedSnapshot: await sealJson(toEditableSnapshot(employee), `otp:${subjectKey}`)
   });
   console.log(`[${requestId}] Verification code sent to ${maskEmail(employee.email)}`);
   return jsonResponse(200, genericSuccess);
@@ -647,7 +688,10 @@ exports.verifyCodeHandler = async (event) => {
     });
   }
 
-  const otpSession = consumeOtp(nric, verificationCode);
+  if (!getProtectionKey()) return jsonResponse(500, { error: 'Configuration error' });
+
+  const subjectKey = nricKey(nric);
+  const otpSession = consumeOtp(subjectKey, verificationCode);
   if (!otpSession) {
     return jsonResponse(401, {
       error: 'Verification failed',
@@ -655,12 +699,20 @@ exports.verifyCodeHandler = async (event) => {
     });
   }
 
-  const particulars = toEditableSnapshot(otpSession.employee);
+  let particulars;
+  try {
+    particulars = await openJson(otpSession.sealedSnapshot, `otp:${subjectKey}`);
+  } catch {
+    return jsonResponse(401, {
+      error: 'Verification failed',
+      details: GENERIC_VERIFY_FAILURE
+    });
+  }
   const updateToken = generateUpdateToken();
-  verifiedSessionStore.set(updateToken, {
-    employeeId: otpSession.employee.id,
-    nric,
-    originalSnapshot: particulars,
+  stores.sessions.set(tokenKey(updateToken), {
+    employeeId: otpSession.employeeId,
+    nricKey: subjectKey,
+    sealedSnapshot: await sealJson(particulars, `session:${updateToken}`),
     expiresAt: now() + VERIFIED_SESSION_TTL_MS
   });
 
@@ -672,10 +724,10 @@ exports.verifyCodeHandler = async (event) => {
   });
 };
 
-const processParticularsUpdate = async (formData, session, requestId) => {
+const processParticularsUpdate = async (formData, session, originalSnapshot, requestId) => {
   const freshEmployee = await getEmployeeById(session.employeeId, requestId);
   const freshNric = normaliseNric(freshEmployee.ssn || freshEmployee.identification_number);
-  if (freshNric !== session.nric) {
+  if (nricKey(freshNric) !== session.nricKey) {
     const error = createError(
       'Employee identity changed before update',
       409,
@@ -687,7 +739,7 @@ const processParticularsUpdate = async (formData, session, requestId) => {
 
   const { payload, changedFields } = buildUpdatePayload(
     formData,
-    session.originalSnapshot,
+    originalSnapshot,
     freshEmployee
   );
   if (!changedFields.length) {
@@ -740,13 +792,14 @@ exports.handler = async (event) => {
   const requestId = `upd_${now()}_${Math.random().toString(36).slice(2, 9)}`;
   const formData = parseBody(event);
   if (!formData) return jsonResponse(400, { error: 'Invalid request' });
-  if (!process.env.TALENOX_API_KEY || !process.env.TALENOX_API_URL) {
+  if (!process.env.TALENOX_API_KEY || !process.env.TALENOX_API_URL || !getProtectionKey()) {
     return jsonResponse(500, { error: 'Configuration error' });
   }
 
   cleanupExpiredState();
   const updateToken = normaliseText(formData.updateToken);
-  const session = verifiedSessionStore.get(updateToken);
+  const sessionKey = tokenKey(updateToken);
+  const session = updateToken ? stores.sessions.get(sessionKey) : null;
   if (!session) {
     return jsonResponse(401, {
       error: 'Verification expired',
@@ -760,8 +813,33 @@ exports.handler = async (event) => {
     });
   }
 
-  const validationErrors = validateUpdateFormData(formData, session.originalSnapshot);
+  // Claim the token synchronously before any await. Validation failures and
+  // failed upstream requests unlock it for retry; a successful request consumes it.
+  session.inFlight = true;
+  stores.sessions.set(sessionKey, session);
+  const unlockSession = () => {
+    if (session.expiresAt <= now()) {
+      stores.sessions.delete(sessionKey);
+    } else {
+      session.inFlight = false;
+      stores.sessions.set(sessionKey, session);
+    }
+  };
+
+  let originalSnapshot;
+  try {
+    originalSnapshot = await openJson(session.sealedSnapshot, `session:${updateToken}`);
+  } catch {
+    stores.sessions.delete(sessionKey);
+    return jsonResponse(401, {
+      error: 'Verification expired',
+      details: 'Please request and verify a new code.'
+    });
+  }
+
+  const validationErrors = validateUpdateFormData(formData, originalSnapshot);
   if (validationErrors.length) {
+    unlockSession();
     return jsonResponse(400, {
       error: 'Validation failed',
       details: validationErrors,
@@ -769,14 +847,9 @@ exports.handler = async (event) => {
     });
   }
 
-  // Claim the token synchronously before any upstream await. A failed upstream
-  // request unlocks it for retry; a successful request consumes it.
-  session.inFlight = true;
-  verifiedSessionStore.set(updateToken, session);
-
   try {
-    const result = await processParticularsUpdate(formData, session, requestId);
-    verifiedSessionStore.delete(updateToken);
+    const result = await processParticularsUpdate(formData, session, originalSnapshot, requestId);
+    stores.sessions.delete(sessionKey);
     return jsonResponse(200, {
       success: true,
       message: 'Your particulars have been updated successfully.',
@@ -789,12 +862,8 @@ exports.handler = async (event) => {
   } catch (error) {
     const statusCode = error.statusCode || 502;
     console.error(`[${requestId}] Update failed: ${error.message}`);
-    if (error.invalidateSession || session.expiresAt <= now()) {
-      verifiedSessionStore.delete(updateToken);
-    } else {
-      session.inFlight = false;
-      verifiedSessionStore.set(updateToken, session);
-    }
+    if (error.invalidateSession) stores.sessions.delete(sessionKey);
+    else unlockSession();
     if (statusCode >= 500) {
       await sendUpdateFailureNotification(
         formData,
@@ -813,12 +882,16 @@ exports.handler = async (event) => {
   }
 };
 
+// Used by the Durable Object to swap in persistent stores and run cleanup.
+exports.configureState = ({ stores: nextStores, requireProtectionKey = false } = {}) => {
+  if (nextStores) stores = nextStores;
+  runtime.requireProtectionKey = requireProtectionKey;
+};
+exports.cleanupExpiredState = cleanupExpiredState;
+
 exports._testing = {
   reset() {
-    otpStore.clear();
-    verifiedSessionStore.clear();
-    cooldownStore.clear();
-    ipRequestLog.clear();
+    stores = createMemoryStores();
     Object.assign(runtime, defaultRuntime);
   },
   setRuntime(overrides) {
@@ -826,8 +899,9 @@ exports._testing = {
   },
   state() {
     return {
-      otpCount: otpStore.size,
-      verifiedSessionCount: verifiedSessionStore.size
+      otpCount: stores.otp.size,
+      verifiedSessionCount: stores.sessions.size,
+      stores
     };
   },
   buildUpdatePayload,

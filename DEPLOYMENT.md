@@ -5,7 +5,44 @@ explicit approval for the target and revision before deploying, restarting, or
 stopping shared services. Push and merge require their own authorization. Follow
 the [employee-data and external-action boundaries](AGENTS.md#safety-boundaries).
 
-## Checked-in configuration
+## Cloudflare Workers
+
+[wrangler.jsonc](wrangler.jsonc) defines the Worker `hr-onboarding` (Workers Paid plan):
+
+- Static site from `public/`; the Worker runs first and redirects HTTP to HTTPS.
+- `POST /api/submit-onboarding` validates, encrypts the submission with
+  `DATA_PROTECTION_KEY`, queues it on `hr-onboarding-submissions` and returns 202.
+  The queue consumer runs the existing onboarding logic one message at a time.
+- Update-particulars requests go to one SQLite-backed Durable Object
+  (`ParticularsState`, location hint APAC). It stores keyed hashes, reference IDs
+  and encrypted snapshots, purges expired rows on requests and by alarm, and
+  survives restarts. Cloudflare may keep deleted rows in its 30-day recovery history.
+- No public URL until a route is added (`workers_dev` is off). Persistent Workers
+  Logs are off because redacted logs still contain names and emails; use
+  `npx wrangler tail` for live logs.
+
+Every step below is an external write. Get explicit approval for the Cloudflare
+account and each step, and do not print secret values.
+
+1. Authenticate Wrangler to the intended account (`npx wrangler whoami` to confirm).
+2. Create the queue: `npx wrangler queues create hr-onboarding-submissions`.
+3. Set secrets with `npx wrangler secret put <NAME>`: `TALENOX_API_KEY`,
+   `RESEND_API_KEY`, `NOTIFY_EMAIL`, `FROM_EMAIL`, and `DATA_PROTECTION_KEY`
+   (`openssl rand -base64 32`, kept in the team password manager). Changing the key
+   invalidates outstanding codes and any queued submissions. `TALENOX_API_URL` is a
+   checked-in var. `ALLOWED_ORIGINS` is only needed for other-origin callers.
+4. `npx wrangler deploy` with the reviewed revision. The Durable Object migration
+   `v1` runs on the first deploy.
+5. Domain cutover: the `tk.sg` zone must be in the same Cloudflare account. Enable
+   the `routes` entry in `wrangler.jsonc`. A custom domain cannot be attached while
+   another DNS record exists for that hostname, so removing the record that points to
+   the current server is part of the cutover. Keep that server running until the
+   Worker is checked; rollback is restoring the old DNS record.
+6. Check `/` and `/api/health` only. Do not submit test data to production.
+
+## Docker / Express (current server)
+
+### Checked-in configuration
 
 - Repository: `tinkertanker/hr-onboarding-talenox`.
 - [deploy.sh](deploy.sh) connects to `tinkertanker@dev.tk.sg`, enters
@@ -20,7 +57,7 @@ the [employee-data and external-action boundaries](AGENTS.md#safety-boundaries).
 These are repository-configured targets, not confirmation of live server state.
 Older migration documents may name different repositories, branches, or paths.
 
-## Before an authorized deployment
+### Before an authorized deployment
 
 Confirm the live checkout path, remote, branch, exact revision, working-tree state,
 and rollback plan. Do not run `deploy.sh` blindly: its unpinned pull may deploy more
@@ -31,8 +68,8 @@ without printing credentials or employee data. See [configuration](README.md#con
 and [.env.example](.env.example); production also requires `ALLOWED_ORIGINS`, which
 the template does not currently include. Keep `.env` out of version control.
 
-Update-particulars OTP/session storage is in memory: retain a single app process
-unless shared storage is implemented; a restart invalidates active sessions.
+Under Express, update-particulars OTP/session storage is in memory: retain a single
+app process; a restart invalidates active sessions.
 
 After an authorized rollout, check health and inspect logs without copying employee
 data or secrets. Deployment approval does not authorize test employee creation,
