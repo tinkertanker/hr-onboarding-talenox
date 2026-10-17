@@ -3,32 +3,6 @@
 // Initialize Resend for email notifications
 const { Resend } = require('resend');
 
-// Helper function to redact sensitive data for logging
-const redactSensitiveData = (data) => {
-  if (data === null || data === undefined) return data;
-  if (Array.isArray(data)) return data.map(redactSensitiveData);
-  if (typeof data !== 'object') return data;
-
-  const redacted = {};
-  for (const [key, value] of Object.entries(data)) {
-    const lowerKey = key.toLowerCase();
-    if (lowerKey === 'nric' || lowerKey === 'ssn') {
-      const text = String(value || '');
-      redacted[key] = text ? `${text.slice(0, 1)}****${text.slice(-1)}` : value;
-    } else if (
-      lowerKey === 'accountnumber' ||
-      lowerKey === 'account_number' ||
-      lowerKey === 'number'
-    ) {
-      const text = String(value || '');
-      redacted[key] = text ? `****${text.slice(-4)}` : value;
-    } else {
-      redacted[key] = redactSensitiveData(value);
-    }
-  }
-  return redacted;
-};
-
 const sendEmailOrThrow = async (resend, payload) => {
   const result = await resend.emails.send(payload);
   if (result && result.error) {
@@ -167,7 +141,7 @@ const createJobForEmployee = async (employeeId, formData, hiredDate, resignDate,
       }
     };
     
-    console.log(`[${requestId}] Creating job for employee:`, employeeId, 'with data:', jobData);
+    console.log(`[${requestId}] Creating job for employee:`, employeeId);
     
     const jobResponse = await fetch(`${process.env.TALENOX_API_URL}/jobs`, {
       method: 'POST',
@@ -189,7 +163,7 @@ const createJobForEmployee = async (employeeId, formData, hiredDate, resignDate,
     }
     
   } catch (error) {
-    console.error('Error creating job:', error);
+    console.error(`[${requestId}] Error creating job`);
     throw error;
   }
 };
@@ -282,7 +256,7 @@ const getNextEmployeeId = async (formData) => {
     throw new Error(`Talenox employee lookup failed (Status: ${response.status})`);
   } catch (error) {
     if (error.errorType === 'duplicate') throw error;
-    console.error('Could not fetch existing employees:', error.message);
+    console.error('Could not fetch existing employees');
     const lookupError = new Error('Could not retrieve existing employees from Talenox');
     lookupError.hrErrorType = 'Talenox API Error (employee lookup)';
     lookupError.hrErrorDetails = 'Could not check existing employees before creating the new profile';
@@ -365,19 +339,15 @@ const getFailureExplanation = (errorType) => {
 // One failure email to HR and the submitter together
 const sendFailureNotification = async (
   formData,
-  { employeeErrorType, hrErrorType, hrErrorDetails },
-  resendClient = null
+  { employeeErrorType, hrErrorType, hrErrorDetails }
 ) => {
-  if (
-    !process.env.NOTIFY_EMAIL ||
-    (!resendClient && !process.env.RESEND_API_KEY)
-  ) {
+  if (!process.env.NOTIFY_EMAIL || !process.env.RESEND_API_KEY) {
     console.log('Resend not configured, skipping failure notification');
     return;
   }
 
   try {
-    const resend = resendClient || new Resend(process.env.RESEND_API_KEY);
+    const resend = new Resend(process.env.RESEND_API_KEY);
     const employeeTypeText = EMPLOYEE_TYPE_LABELS;
     const explanation = getFailureExplanation(employeeErrorType);
     const hrEmail = process.env.NOTIFY_EMAIL;
@@ -607,14 +577,14 @@ exports.handler = async (event, { dispatch } = {}) => {
     }
     
     // Return 202 Accepted immediately for background processing
-    console.log(`[${requestId}] Accepted submission for background processing:`, redactSensitiveData(formData));
+    console.log(`[${requestId}] Accepted submission for background processing`);
     
     // Failure emails (HR + employee) are sent inside processOnboarding — once only
     if (dispatch) {
       try {
         await dispatch(formData, requestId);
-      } catch (error) {
-        console.error(`[${requestId}] Could not queue submission:`, error.message);
+      } catch {
+        console.error(`[${requestId}] Could not queue submission`);
         return {
           statusCode: 503,
           headers: { 'Content-Type': 'application/json' },
@@ -626,9 +596,8 @@ exports.handler = async (event, { dispatch } = {}) => {
         };
       }
     } else {
-      processOnboarding(formData, requestId).catch(error => {
-        console.error(`[${requestId}] Background processing failed:`, error);
-      });
+      // processOnboarding logs failures and sends the failure notification.
+      processOnboarding(formData, requestId).catch(() => {});
     }
     
     // Return immediately - client gets this response right away
@@ -645,8 +614,8 @@ exports.handler = async (event, { dispatch } = {}) => {
       })
     };
     
-  } catch (error) {
-    console.error('Request parsing error:', error);
+  } catch {
+    console.error('Request parsing error');
     return {
       statusCode: 400,
       headers: {
@@ -666,8 +635,8 @@ async function processOnboarding(formData, requestId) {
   try {
     const startTime = Date.now();
     
-    // Log request (with sensitive data redacted)
-    console.log(`[${requestId}] Processing submission in background:`, redactSensitiveData(formData));
+    // Keep logs to operational metadata; partial redaction still exposes particulars.
+    console.log(`[${requestId}] Processing submission in background`);
     
     // Transform data for Talenox (including employee ID generation)
     const transformStart = Date.now();
@@ -682,7 +651,6 @@ async function processOnboarding(formData, requestId) {
     
     // Call Talenox API
     console.log(`[${requestId}] Creating employee via Talenox API`);
-    console.log(`[${requestId}] Sending data:`, redactSensitiveData(talenoxData));
     
     const talenoxResponse = await fetch(`${process.env.TALENOX_API_URL}/employees`, {
       method: 'POST',
@@ -727,9 +695,7 @@ async function processOnboarding(formData, requestId) {
     const jobStart = Date.now();
     const [jobResult] = await Promise.allSettled([
       createJobForEmployee(employeeId, formData, talenoxData.hired_date, talenoxData.resign_date, requestId),
-      sendHRNotification(formData, employeeId, null, talenoxData.employee_id).catch(err => 
-        console.error('Failed to send HR notification:', err)
-      )
+      sendHRNotification(formData, employeeId, null, talenoxData.employee_id)
     ]);
     
     console.log(`[${requestId}] [Timing] Job creation completed in ${Date.now() - jobStart}ms`);
@@ -740,7 +706,7 @@ async function processOnboarding(formData, requestId) {
     const jobId = jobCreated ? jobResult.value?.id : null;
     
     if (!jobCreated) {
-      console.error(`[${requestId}] Job creation failed, but employee was created:`, jobResult.reason);
+      console.error(`[${requestId}] Job creation failed, but employee was created`);
     } else {
       console.log(`[${requestId}] Job created successfully for employee:`, employeeId);
     }
@@ -754,8 +720,7 @@ async function processOnboarding(formData, requestId) {
     };
     
   } catch (error) {
-    console.error(`[${requestId}] Background processing error:`, error);
-    console.error(`[${requestId}] Error stack:`, error.stack);
+    console.error(`[${requestId}] Background processing error`);
     
     // One email to HR and the submitter together (submitter already saw the success screen)
     const employeeErrorType = error.errorType === 'duplicate' ? 'duplicate' : 'system';
@@ -765,21 +730,8 @@ async function processOnboarding(formData, requestId) {
       // Keep shared email free of raw exception text that may echo request fields
       hrErrorDetails: error.hrErrorDetails || 'An unexpected error occurred during onboarding'
     });
-    if (!error.hrErrorDetails) {
-      console.error(`[${requestId}] Unexpected error details (server log only):`, error.message);
-    }
-    
     throw error;
   }
 }
 
 exports.processOnboarding = processOnboarding;
-
-exports._testing = {
-  redactSensitiveData,
-  sendEmailOrThrow,
-  sendFailureNotification,
-  classifyEmployeeCreationError,
-  getNextEmployeeId,
-  processOnboarding
-};

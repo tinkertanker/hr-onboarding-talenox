@@ -57,13 +57,25 @@ test('cross-origin API calls need ALLOWED_ORIGINS; same-origin calls do not', as
 
 test('accepted submissions are queued encrypted and fail visibly if queueing fails', async () => {
   const env = makeEnv();
-  assert.equal((await submit(env)).status, 202);
+  const accepted = await submit(env);
+  assert.equal(accepted.status, 202);
+  const receipt = await accepted.json();
+  assert.equal(receipt.success, true);
+  assert.equal(typeof receipt.requestId, 'string');
+  assert.ok(receipt.requestId.length > 0);
   const [message] = env.sent;
   const raw = JSON.stringify(message);
   for (const value of [form.nric, form.accountNumber, form.email]) assert.ok(!raw.includes(value));
   const opened = await dataProtection.openJson(message.sealed, KEY, 'onboarding-queue');
   assert.deepEqual(opened.formData, form);
-  assert.equal(opened.requestId, message.requestId);
+  assert.equal(opened.requestId, receipt.requestId);
+  assert.equal(message.requestId, receipt.requestId);
+  await assert.rejects(dataProtection.openJson(message.sealed, 'w'.repeat(32), 'onboarding-queue'));
+  await assert.rejects(dataProtection.openJson(message.sealed, KEY, 'another-context'));
+  const [iv, ciphertext] = message.sealed.split('.');
+  const tampered = Buffer.from(ciphertext, 'base64');
+  tampered[0] ^= 1;
+  await assert.rejects(dataProtection.openJson(`${iv}.${tampered.toString('base64')}`, KEY, 'onboarding-queue'));
 
   const failing = makeEnv(async () => { throw new Error('queue unavailable'); });
   const response = await submit(failing);
@@ -90,17 +102,19 @@ const streamRequest = (chunks) => new Request(`${ORIGIN}/api/submit-onboarding`,
 
 test('the body limit applies to streamed bodies without Content-Length', async () => {
   const env = makeEnv();
-  const oversized = streamRequest(Array.from({ length: 11 }, () => new Uint8Array(10 * 1024).fill(32)));
-  assert.equal(oversized.headers.get('Content-Length'), null);
-  assert.equal((await worker.fetch(oversized, env)).status, 413);
-
-  // A multi-byte character split across chunks must still decode correctly.
+  // Exactly 100 KiB is valid even when a multi-byte character crosses chunks.
   const bytes = new TextEncoder().encode(JSON.stringify({ ...form, fullName: 'Zoë Tan' }));
   const split = bytes.indexOf(0xc3) + 1;
-  const accepted = await worker.fetch(streamRequest([bytes.slice(0, split), bytes.slice(split)]), env);
+  const padding = new Uint8Array(100 * 1024 - bytes.byteLength).fill(32);
+  const accepted = await worker.fetch(streamRequest([bytes.slice(0, split), bytes.slice(split), padding]), env);
   assert.equal(accepted.status, 202);
   const opened = await dataProtection.openJson(env.sent[0].sealed, KEY, 'onboarding-queue');
   assert.equal(opened.formData.fullName, 'Zoë Tan');
+
+  // The same valid JSON with one extra byte must not reach the queue.
+  const oversized = streamRequest([bytes, padding, new Uint8Array([32])]);
+  assert.equal((await worker.fetch(oversized, env)).status, 413);
+  assert.equal(env.sent.length, 1);
 });
 
 test('an oversized body that never ends is rejected once the drain bound is reached', async () => {

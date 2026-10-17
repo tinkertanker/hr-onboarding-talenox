@@ -153,8 +153,8 @@ const handleApi = async (request, env, url) => {
     const headers = new Headers(response.headers);
     for (const [key, value] of Object.entries(cors)) headers.set(key, value);
     return new Response(response.body, { status: response.status, headers });
-  } catch (error) {
-    console.error(`Error in ${url.pathname}:`, error && error.message);
+  } catch {
+    console.error(`Error in ${url.pathname}`);
     return jsonResponse(500, { success: false, message: 'Internal server error' }, cors);
   }
 };
@@ -181,9 +181,9 @@ export default {
       let submission;
       try {
         submission = await dataProtection.openJson(message.body.sealed, key, QUEUE_CONTEXT);
-      } catch (error) {
+      } catch {
         // Retrying cannot help, and there is no readable address to notify.
-        console.error(`[${requestId}] Discarding unreadable onboarding message: ${error.message}`);
+        console.error(`[${requestId}] Discarding unreadable onboarding message`);
         message.ack();
         continue;
       }
