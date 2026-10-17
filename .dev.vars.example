@@ -1,0 +1,11 @@
+# Local Worker settings for `npx wrangler dev`. Copy to .dev.vars (gitignored).
+# Points every provider call at scripts/mock-providers.js. Never put real
+# Talenox or Resend keys here: wrangler dev makes real calls with them.
+TALENOX_API_URL=http://127.0.0.1:8790/api/v2
+TALENOX_API_KEY=mock-talenox-key
+RESEND_BASE_URL=http://127.0.0.1:8790
+RESEND_API_KEY=re_mock_key
+NOTIFY_EMAIL=hr@example.test
+FROM_EMAIL=Onboarding <onboarding@example.test>
+# Any random string of 32+ characters, e.g. `openssl rand -base64 32`.
+DATA_PROTECTION_KEY=local-development-only-key-0123456789

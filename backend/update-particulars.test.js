@@ -139,6 +139,41 @@ test('OTP verification is single-use and returns only a safe editable snapshot',
   assert.equal(replay.status, 401);
 });
 
+test('stored verification state contains no raw identifiers, codes, tokens or particulars', async () => {
+  const runtimeState = createRuntime(makeEmployee());
+  const dumpState = () => JSON.stringify(
+    Object.fromEntries(Object.entries(updateParticulars._testing.state().stores)
+      .map(([name, store]) => [name, [...store.entries()]]))
+  );
+  const forbidden = (extra = []) => [
+    NRIC, '203.0.113.10', 'alex@example.com', 'Alex Tan', '123456789', 'DBS', '1990-01-15', ...extra
+  ];
+
+  await updateParticulars.requestCodeHandler(makeEvent({ nric: NRIC }));
+  const code = runtimeState.emails[0].text.match(/is: (\d{6})/)[1];
+  const afterRequest = dumpState();
+  for (const value of forbidden([code])) assert.ok(!afterRequest.includes(value), value);
+
+  const verified = parseResult(await updateParticulars.verifyCodeHandler(
+    makeEvent({ nric: NRIC, verificationCode: code })
+  ));
+  assert.equal(verified.body.particulars.bank, 'DBS');
+  const afterVerify = dumpState();
+  for (const value of forbidden([code, verified.body.updateToken])) {
+    assert.ok(!afterVerify.includes(value), value);
+  }
+});
+
+test('persistent-state mode refuses to run without a stable protection key', async () => {
+  createRuntime(makeEmployee());
+  updateParticulars.configureState({ requireProtectionKey: true });
+  delete process.env.DATA_PROTECTION_KEY;
+
+  const result = parseResult(await updateParticulars.requestCodeHandler(makeEvent({ nric: NRIC })));
+  assert.equal(result.status, 500);
+  assert.equal(updateParticulars._testing.state().otpCount, 0);
+});
+
 test('a bank-only update preserves all other fields and uses the documented envelope', async () => {
   const employee = makeEmployee();
   const runtimeState = createRuntime(employee);

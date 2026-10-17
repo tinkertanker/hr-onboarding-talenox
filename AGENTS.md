@@ -45,8 +45,9 @@ real external writes, email, deployment, push, or merge.
 
 - [README](README.md): setup, [mocked testing](README.md#testing), and product context.
   [package.json](package.json) is the command source of truth.
-- [server.js](server.js) owns routes/configuration; handlers and adjacent tests live
-  in [backend](backend/). Inspect the relevant implementation rather than relying
+- [server.js](server.js) (Express) and [worker/index.mjs](worker/index.mjs)
+  (Cloudflare) both route to the handlers in [backend](backend/), which have adjacent
+  tests. `npm run mock-providers` serves synthetic Talenox and Resend for local runs. Inspect the relevant implementation rather than relying
   on historical feature inventories or provider examples.
 - [Deployment notes](DEPLOYMENT.md) describe configured targets, not permission to
   deploy. Historical migration plans under `docs/` are not current runbooks.

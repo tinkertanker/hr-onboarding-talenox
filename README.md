@@ -28,15 +28,30 @@ npm run dev
 # Visit http://localhost:3000
 ```
 
+To submit forms locally, run the mock providers and point the app at them:
+
+```bash
+npm run mock-providers            # synthetic Talenox + Resend on 127.0.0.1:8790
+cp .dev.vars.example .dev.vars    # mock URLs and dummy keys only
+npm run worker:dev                # Cloudflare Worker locally (http://localhost:8787)
+```
+
+The mock holds one synthetic employee (NRIC `S0000001I`) for the update flow and
+lists received requests, including email bodies, at `http://127.0.0.1:8790/__calls`.
+The same `TALENOX_API_URL` and `RESEND_BASE_URL` values also work for Express.
+Check the settings before submitting: whatever keys the app has are used for real.
+
 The server loads `.env` as well as inherited environment variables. Do not load
 production credentials for local development. [.env.example](.env.example) is a
 configuration reference, not a mock preset; there is no built-in server mock mode.
 
-### Docker Deployment
+### Deployment
 
-Deployment requires explicit approval for the target. See
-[DEPLOYMENT.md](DEPLOYMENT.md) for configuration and approval prerequisites;
-the checked-in Compose file targets shared infrastructure, not an isolated local sandbox.
+The app runs as a Cloudflare Worker ([wrangler.jsonc](wrangler.jsonc)) or as the
+original Express/Docker server. Deployment requires explicit approval for the
+target. See [DEPLOYMENT.md](DEPLOYMENT.md) for configuration and approval
+prerequisites; the checked-in Compose file targets shared infrastructure, not an
+isolated local sandbox.
 
 ## Configuration
 
@@ -46,7 +61,11 @@ Integration settings in the process environment or `.env` (not needed for mocked
 - `RESEND_API_KEY` - Email service API key
 - `NOTIFY_EMAIL` - HR notification email
 - `FROM_EMAIL` - Sender email address
-- `ALLOWED_ORIGINS` - Comma-separated allowed origins, required in production
+- `ALLOWED_ORIGINS` - Comma-separated allowed origins, required in production for
+  Express. The Worker always allows same-origin requests and uses this only for other origins.
+- `DATA_PROTECTION_KEY` - Random string of 32+ characters that keys hashes and encrypts
+  stored verification state and queued submissions. Required for the Worker; Express
+  generates a per-process key if it is unset.
 
 ## Features
 
@@ -58,18 +77,25 @@ Integration settings in the process environment or `.env` (not needed for mocked
 - **Email Notifications**: Automatic HR notifications upon submission
 - **Privacy**: NRIC/FIN and bank-number redaction exists, but is not full anonymization; never use real employee data for development
 
-> **Note:** Update-particulars OTP sessions are stored in memory. Run a single app container/process, or replace the store before scaling horizontally.
+> **Note:** In Express, update-particulars OTP sessions are stored in memory, so run a
+> single process. The Worker keeps them in one Durable Object, storing only keyed
+> hashes, reference IDs and encrypted snapshots.
 
 ## Project Structure
 
 ```
-├── index.html              # Main form interface (onboarding + update modes)
-├── styles.css              # Styling
-├── script.js               # Form logic
+├── public/                 # Static site (only this folder is served)
+│   ├── index.html          # Main form interface (onboarding + update modes)
+│   ├── styles.css          # Styling
+│   └── script.js           # Form logic
 ├── server.js               # Express.js server
+├── worker/                 # Cloudflare Worker, queue consumer and Durable Object
+├── wrangler.jsonc          # Cloudflare configuration
 ├── backend/
 │   ├── submit-onboarding.js    # New employee onboarding API
-│   └── update-particulars.js   # Existing employee update API
+│   ├── update-particulars.js   # Existing employee update API
+│   └── data-protection.js      # Encryption for stored/queued personal data
+├── scripts/mock-providers.js   # Local synthetic Talenox + Resend
 ├── docker-compose.yml      # Docker configuration
 ├── Dockerfile              # Container definition
 └── docs/                   # Additional documentation
@@ -89,6 +115,10 @@ npm test
 # Focus on the affected handler
 node --test backend/submit-onboarding.test.js
 node --test backend/update-particulars.test.js
+node --test worker/index.test.mjs
+
+# Bundle the Worker without deploying
+npm run worker:build
 ```
 
 Use [submit-onboarding.test.js](backend/submit-onboarding.test.js) for `global.fetch`
