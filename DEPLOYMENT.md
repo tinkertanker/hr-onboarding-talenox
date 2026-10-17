@@ -24,7 +24,8 @@ the [employee-data and external-action boundaries](AGENTS.md#safety-boundaries).
 Every step below is an external write. Get explicit approval for the Cloudflare
 account and each step, and do not print secret values.
 
-1. Authenticate Wrangler to the intended account (`npx wrangler whoami` to confirm).
+1. Authenticate Wrangler to the Tinkertanker account pinned in `wrangler.jsonc`
+   (`npx wrangler whoami` to confirm).
 2. Create the queue: `npx wrangler queues create hr-onboarding-submissions`.
 3. Set secrets with `npx wrangler secret put <NAME>`: `TALENOX_API_KEY`,
    `RESEND_API_KEY`, `NOTIFY_EMAIL`, `FROM_EMAIL`, and `DATA_PROTECTION_KEY`

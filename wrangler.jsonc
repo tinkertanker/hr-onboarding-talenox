@@ -3,6 +3,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "hr-onboarding",
+  "account_id": "b8b1032c61d9475cd00229c74db7ec72", // Tinkertanker
   "main": "worker/index.mjs",
   "compatibility_date": "2025-09-01",
   // nodejs_compat provides node:crypto, Buffer and a populated process.env.
