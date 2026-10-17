@@ -34,11 +34,11 @@ account and each step, and do not print secret values.
    checked-in var. `ALLOWED_ORIGINS` is only needed for other-origin callers.
 4. `npx wrangler deploy` with the reviewed revision. The Durable Object migration
    `v1` runs on the first deploy.
-5. Domain cutover: the `tk.sg` zone must be in the same Cloudflare account. Enable
-   the `routes` entry in `wrangler.jsonc`. A custom domain cannot be attached while
-   another DNS record exists for that hostname, so removing the record that points to
-   the current server is part of the cutover. Keep that server running until the
-   Worker is checked; rollback is restoring the old DNS record.
+5. Domain: `wrangler.jsonc` attaches `hr-onboarding.tk.sg` (zone `tk.sg`, same
+   account) as a custom domain. The hostname has no DNS record of its own; it
+   previously reached the Docker server through the `*.tk.sg` wildcard. To roll back,
+   remove the custom domain (Workers > hr-onboarding > Domains, or comment out
+   `routes` and redeploy) and the wildcard routes traffic to the server again.
 6. Check `/` and `/api/health` only. Do not submit test data to production.
 
 ## Docker / Express (current server)

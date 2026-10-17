@@ -10,10 +10,10 @@
   "compatibility_flags": ["nodejs_compat"],
   "alias": { "@react-email/render": "./worker/no-react-email.mjs" },
 
-  // No public URL until the custom domain is chosen at cutover (DEPLOYMENT.md).
+  // Served only on the custom domain (it overrides the *.tk.sg wildcard to the office).
   "workers_dev": false,
   "preview_urls": false,
-  // "routes": [{ "pattern": "hr-onboarding.tk.sg", "custom_domain": true }],
+  "routes": [{ "pattern": "hr-onboarding.tk.sg", "custom_domain": true }],
 
   "assets": {
     "directory": "./public",
