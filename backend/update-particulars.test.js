@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { inspect } = require('node:util');
 
 const updateParticulars = require('./update-particulars');
 
@@ -50,6 +51,8 @@ const createRuntime = (employee, putStatuses = [200]) => {
   const calls = [];
   const emails = [];
   let putIndex = 0;
+  let markPutStarted;
+  const putStarted = new Promise((resolve) => { markPutStarted = resolve; });
 
   updateParticulars._testing.setRuntime({
     fetch: async (url, options = {}) => {
@@ -61,7 +64,8 @@ const createRuntime = (employee, putStatuses = [200]) => {
         return makeResponse(200, employee);
       }
       if (url === `${API_URL}/employees/123` && options.method === 'PUT') {
-        const status = putStatuses[Math.min(putIndex, putStatuses.length - 1)];
+        markPutStarted();
+        const status = await putStatuses[Math.min(putIndex, putStatuses.length - 1)];
         putIndex += 1;
         return makeResponse(status, status === 200 ? employee : { error: 'upstream failure' });
       }
@@ -74,7 +78,7 @@ const createRuntime = (employee, putStatuses = [200]) => {
     upstreamTimeoutMs: 100
   });
 
-  return { calls, emails };
+  return { calls, emails, putStarted };
 };
 
 const requestAndVerify = async (runtimeState) => {
@@ -231,43 +235,67 @@ test('an email-only update preserves Other citizenship, legacy bank labels and a
   assert.deepEqual(putBody, { employee: { email: 'alex.new@example.com' } });
 });
 
-test('update notifications run independently and email failure does not replay a successful update', async () => {
-  const runtimeState = createRuntime(makeEmployee());
-  const verified = await requestAndVerify(runtimeState);
-  let finishPreviousEmail;
-  const previousEmail = new Promise((resolve) => { finishPreviousEmail = resolve; });
-  const notices = [];
-  updateParticulars._testing.setRuntime({
-    sendEmail: async (email) => {
-      notices.push(email);
-      if (email.to === 'alex@example.com') return previousEmail;
-      // HR delivery must begin without waiting for the previous-address notice.
-      finishPreviousEmail({ data: { id: 'previous-email' } });
-      throw new Error('HR delivery unavailable');
-    }
-  });
-  const submission = makeEvent({
-    ...verified.particulars,
-    email: 'alex.new@example.com',
-    accountNumber: '',
-    updateToken: verified.updateToken
-  });
+test('update notifications run independently after PUT and never replay a successful update', async () => {
+  for (const [previousEmailOk, hrOk] of [[true, true], [true, false], [false, true], [false, false]]) {
+    updateParticulars._testing.reset();
+    let finishPut;
+    const putStatus = new Promise((resolve) => { finishPut = resolve; });
+    const runtimeState = createRuntime(makeEmployee(), [putStatus]);
+    const verified = await requestAndVerify(runtimeState);
+    let finishPreviousEmail;
+    let failPreviousEmail;
+    const previousEmail = new Promise((resolve, reject) => {
+      finishPreviousEmail = resolve;
+      failPreviousEmail = reject;
+    });
+    const notices = [];
+    updateParticulars._testing.setRuntime({
+      sendEmail: async (email) => {
+        notices.push(email);
+        if (email.to === 'alex@example.com') return previousEmail;
+        // HR delivery must begin without waiting for the previous-address notice.
+        if (previousEmailOk) finishPreviousEmail({ data: { id: 'previous-email' } });
+        else failPreviousEmail(new Error('Previous-address delivery unavailable'));
+        if (!hrOk) throw new Error('HR delivery unavailable');
+        return { data: { id: 'hr-email' } };
+      }
+    });
+    const submission = makeEvent({
+      ...verified.particulars,
+      email: 'alex.new@example.com',
+      accountNumber: '',
+      updateToken: verified.updateToken
+    });
 
-  const result = parseResult(await updateParticulars.handler(submission));
-  assert.equal(result.status, 200);
-  assert.deepEqual(result.body.notifications, { previousEmail: true, hr: false });
-  assert.deepEqual(notices.map((email) => email.to).sort(), ['alex@example.com', 'hr@example.com']);
-  assert.equal(parseResult(await updateParticulars.handler(submission)).status, 401);
-  assert.equal(runtimeState.calls.filter((call) => call.options.method === 'PUT').length, 1);
+    const pending = updateParticulars.handler(submission);
+    await runtimeState.putStarted;
+    assert.equal(runtimeState.calls.filter((call) => call.options.method === 'PUT').length, 1);
+    assert.deepEqual(notices, [], 'No success notice may precede a successful PUT');
+    finishPut(200);
+    const result = parseResult(await pending);
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body.notifications, { previousEmail: previousEmailOk, hr: hrOk });
+    assert.deepEqual(notices.map((email) => email.to).sort(), ['alex@example.com', 'hr@example.com']);
+    assert.equal(parseResult(await updateParticulars.handler(submission)).status, 401);
+    assert.equal(runtimeState.calls.filter((call) => call.options.method === 'PUT').length, 1);
+  }
 });
 
 test('verification logs exclude addresses and raw provider failures', async (t) => {
   const output = [];
-  t.mock.method(console, 'log', (...args) => output.push(args.join(' ')));
-  t.mock.method(console, 'error', (...args) => output.push(args.join(' ')));
+  t.mock.method(console, 'log', (...args) => output.push(inspect(args, { depth: null })));
+  t.mock.method(console, 'error', (...args) => output.push(inspect(args, { depth: null })));
   const runtimeState = createRuntime(makeEmployee());
   await requestAndVerify(runtimeState);
-  assert.ok(!output.join('\n').includes('example.com'));
+
+  updateParticulars._testing.reset();
+  createRuntime(makeEmployee());
+  updateParticulars._testing.setRuntime({
+    sendEmail: async () => { throw new Error('Rejected alex@example.com'); }
+  });
+  const emailFailure = parseResult(await updateParticulars.requestCodeHandler(makeEvent({ nric: NRIC })));
+  assert.equal(emailFailure.status, 200);
+  assert.match(output.join('\n'), /Verification email failed/);
 
   updateParticulars._testing.reset();
   updateParticulars._testing.setRuntime({
@@ -276,7 +304,9 @@ test('verification logs exclude addresses and raw provider failures', async (t) 
   });
   const result = parseResult(await updateParticulars.requestCodeHandler(makeEvent({ nric: NRIC })));
   assert.equal(result.status, 200);
-  assert.ok(!output.join('\n').includes(NRIC));
+  for (const value of [NRIC, 'example.com', 'Alex Tan', '1990-01-15', '123456789']) {
+    assert.ok(!output.join('\n').includes(value), `Logs must not contain ${value}`);
+  }
   assert.match(output.join('\n'), /Employee lookup failed/);
 });
 
@@ -337,6 +367,9 @@ test('a Talenox failure keeps the verified session available for retry', async (
 
   const failed = parseResult(await updateParticulars.handler(makeEvent(submission)));
   assert.equal(failed.status, 502);
+  assert.equal(runtimeState.emails.some((email) =>
+    /payroll email was changed|particulars updated/i.test(email.subject)
+  ), false, 'A failed PUT must not send success notifications');
 
   const retried = parseResult(await updateParticulars.handler(makeEvent(submission)));
   assert.equal(retried.status, 200);
