@@ -39,6 +39,16 @@ const corsOptions = {
 // Middleware
 app.use(cors(corsOptions));
 app.use(express.json());
+// Parser errors can embed request text in their message/stack. Handle them
+// before Express's default logger, without exposing the body or exception.
+app.use((error, req, res, next) => {
+  const status = error.status || 500;
+  console.error(`Request middleware failed with status ${status}`);
+  res.status(status).json({
+    success: false,
+    message: status === 413 ? 'Request too large' : status === 400 ? 'Invalid request' : 'Internal server error'
+  });
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Import handlers
@@ -82,15 +92,15 @@ async function handleNetlifyStyle(handler, req, res, label) {
         ? JSON.parse(result.body)
         : result.body;
       res.status(result.statusCode).json(responseBody);
-    } catch (parseError) {
-      console.error(`Error parsing ${label} response body:`, parseError);
+    } catch {
+      console.error(`Error parsing ${label} response body`);
       res.status(500).json({
         success: false,
         message: 'Invalid response format'
       });
     }
-  } catch (error) {
-    console.error(`Error in ${label}:`, error);
+  } catch {
+    console.error(`Error in ${label}`);
     res.status(500).json({
       success: false,
       message: 'Internal server error'

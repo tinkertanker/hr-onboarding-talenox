@@ -75,7 +75,7 @@ Integration settings in the process environment or `.env` (not needed for mocked
 - **Banking Integration**: Support for major Singapore banks
 - **Background Processing**: Handles long-running API operations reliably
 - **Email Notifications**: Automatic HR notifications upon submission
-- **Privacy**: NRIC/FIN and bank-number redaction exists, but is not full anonymization; never use real employee data for development
+- **Privacy**: Application logs use operational metadata rather than form/provider payloads; never use real employee data for development
 
 > **Note:** In Express, update-particulars OTP sessions are stored in memory, so run a
 > single process. The Worker keeps them in one Durable Object, storing only keyed
@@ -122,7 +122,7 @@ npm run worker:build
 ```
 
 Use [submit-onboarding.test.js](backend/submit-onboarding.test.js) for `global.fetch`
-stubs and injected Resend clients (or disabled email where no send is tested).
+stubs that exercise the public processor and real Resend SDK without network calls.
 [update-particulars.test.js](backend/update-particulars.test.js) injects both
 `fetch` and `sendEmail` with `_testing.setRuntime`. Keep unexpected network calls
 from falling through to real providers; dummy keys alone are not mocks.

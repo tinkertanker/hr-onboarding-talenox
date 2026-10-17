@@ -97,33 +97,6 @@ const createError = (message, statusCode = 502, publicMessage = null) => {
   return error;
 };
 
-const redactSensitiveData = (data) => {
-  if (data === null || data === undefined) return data;
-  if (Array.isArray(data)) return data.map(redactSensitiveData);
-  if (typeof data !== 'object') return data;
-
-  const redacted = {};
-  for (const [key, value] of Object.entries(data)) {
-    const lower = key.toLowerCase();
-    if (lower === 'nric' || lower === 'ssn') {
-      const str = String(value || '');
-      redacted[key] = str ? `${str.slice(0, 1)}****${str.slice(-1)}` : value;
-    } else if (['accountnumber', 'number', 'account_number'].includes(lower)) {
-      const str = String(value || '');
-      redacted[key] = str ? `****${str.slice(-4)}` : value;
-    } else if (
-      ['verificationcode', 'code', 'codehash', 'updatetoken'].includes(lower)
-    ) {
-      redacted[key] = '[REDACTED]';
-    } else if (typeof value === 'object' && value !== null) {
-      redacted[key] = redactSensitiveData(value);
-    } else {
-      redacted[key] = value;
-    }
-  }
-  return redacted;
-};
-
 let processProtectionKey = null;
 const getProtectionKey = () => {
   const configured = process.env.DATA_PROTECTION_KEY;
@@ -159,12 +132,6 @@ const otpHashesEqual = (a, b) => {
 
 const generateOtp = () => String(crypto.randomInt(0, 1000000)).padStart(6, '0');
 const generateUpdateToken = () => crypto.randomBytes(32).toString('hex');
-
-const maskEmail = (email) => {
-  if (!email || !email.includes('@')) return '***';
-  const [local, domain] = email.split('@');
-  return `${local.slice(0, Math.min(2, local.length))}***@${domain}`;
-};
 
 const cleanupExpiredState = () => {
   const currentTime = now();
@@ -638,7 +605,7 @@ exports.requestCodeHandler = async (event) => {
   try {
     employee = await findEmployeeByNric(nric, requestId);
   } catch (error) {
-    console.error(`[${requestId}] Employee lookup failed: ${error.message}`);
+    console.error(`[${requestId}] Employee lookup failed`);
     if (error.code === 'DUPLICATE_NRIC') {
       sendUpdateFailureNotification(
         {},
@@ -656,8 +623,8 @@ exports.requestCodeHandler = async (event) => {
     [employee.first_name, employee.last_name].map(normaliseText).filter(Boolean).join(' ');
   try {
     await sendVerificationEmail(employee.email, code, employeeName);
-  } catch (error) {
-    console.error(`[${requestId}] Verification email failed: ${error.message}`);
+  } catch {
+    console.error(`[${requestId}] Verification email failed`);
     return jsonResponse(200, genericSuccess);
   }
 
@@ -668,7 +635,7 @@ exports.requestCodeHandler = async (event) => {
     employeeId: employee.id,
     sealedSnapshot: await sealJson(toEditableSnapshot(employee), `otp:${subjectKey}`)
   });
-  console.log(`[${requestId}] Verification code sent to ${maskEmail(employee.email)}`);
+  console.log(`[${requestId}] Verification code sent`);
   return jsonResponse(200, genericSuccess);
 };
 
@@ -764,23 +731,23 @@ const processParticularsUpdate = async (formData, session, originalSnapshot, req
     throw createError(`Failed to update employee (${response.status})`);
   }
 
-  const emailChanged = changedFields.includes('email');
-  let previousEmailNotified = false;
-  let hrNotified = false;
-
-  if (emailChanged && freshEmployee.email) {
-    try {
-      await sendEmailChangeNotice(freshEmployee.email, formData.email, formData.fullName);
-      previousEmailNotified = true;
-    } catch (error) {
-      console.error(`[${requestId}] Previous-email notification failed: ${error.message}`);
-    }
-  }
-  try {
-    hrNotified = await sendUpdateHRNotification(formData, freshEmployee, changedFields);
-  } catch (error) {
-    console.error(`[${requestId}] HR notification failed: ${error.message}`);
-  }
+  // Both notifications depend only on the completed update, not each other.
+  // Settle failures separately so mail delivery never replays a successful PUT.
+  const [previousEmailNotified, hrNotified] = await Promise.all([
+    changedFields.includes('email') && freshEmployee.email
+      ? sendEmailChangeNotice(freshEmployee.email, formData.email, formData.fullName)
+        .then(() => true)
+        .catch(() => {
+          console.error(`[${requestId}] Previous-email notification failed`);
+          return false;
+        })
+      : false,
+    sendUpdateHRNotification(formData, freshEmployee, changedFields)
+      .catch(() => {
+        console.error(`[${requestId}] HR notification failed`);
+        return false;
+      })
+  ]);
 
   return { changedFields, previousEmailNotified, hrNotified };
 };
@@ -861,7 +828,7 @@ exports.handler = async (event) => {
     });
   } catch (error) {
     const statusCode = error.statusCode || 502;
-    console.error(`[${requestId}] Update failed: ${error.message}`);
+    console.error(`[${requestId}] Update failed with status ${statusCode}`);
     if (error.invalidateSession) stores.sessions.delete(sessionKey);
     else unlockSession();
     if (statusCode >= 500) {
@@ -869,8 +836,8 @@ exports.handler = async (event) => {
         formData,
         'Update Error',
         'The Talenox update could not be completed.'
-      ).catch((notificationError) =>
-        console.error(`[${requestId}] Failure notification failed: ${notificationError.message}`)
+      ).catch(() =>
+        console.error(`[${requestId}] Failure notification failed`)
       );
     }
     return jsonResponse(statusCode, {
@@ -899,12 +866,7 @@ exports._testing = {
   },
   state() {
     return {
-      otpCount: stores.otp.size,
-      verifiedSessionCount: stores.sessions.size,
       stores
     };
-  },
-  buildUpdatePayload,
-  toEditableSnapshot,
-  redactSensitiveData
+  }
 };
