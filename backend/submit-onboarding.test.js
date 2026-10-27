@@ -59,6 +59,30 @@ test.beforeEach(() => {
   process.env.RESEND_BASE_URL = 'https://resend.test';
 });
 
+test('onboarding accepts only string emails up to 254 characters before dispatch', async (t) => {
+  t.mock.method(global, 'fetch', async () => { throw new Error('Unexpected provider call'); });
+  t.mock.method(console, 'log', () => {});
+  for (const [email, accepted] of [
+    ['a'.repeat(242) + '@example.com', true],
+    ['a'.repeat(243) + '@example.com', false],
+    [['alex@example.com'], false],
+    ['a@' + '.'.repeat(20000) + ' ', false],
+    ['alex+tag@dept.example.test', true],
+    ['alex@example', false],
+    ['alex@example.', false],
+    ['alex@.test', false],
+    ['alex@@example.test', false]
+  ]) {
+    let dispatched = false;
+    const result = await submitOnboarding.handler({
+      httpMethod: 'POST', body: JSON.stringify({ ...formData, email })
+    }, { dispatch: async () => { dispatched = true; } });
+    assert.equal(result.statusCode, accepted ? 202 : 400);
+    assert.equal(dispatched, accepted);
+    if (!accepted) assert.ok(JSON.parse(result.body).details.includes('Invalid email format'));
+  }
+});
+
 test('onboarding failures notify HR and submitter, falling back to HR when delivery is rejected', async (t) => {
   const output = [];
   t.mock.method(console, 'log', (...args) => output.push(args.join(' ')));

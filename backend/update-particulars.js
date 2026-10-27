@@ -13,6 +13,7 @@
 const crypto = require('crypto');
 const { Resend } = require('resend');
 const dataProtection = require('./data-protection');
+const validateEmail = require('./validate-email');
 
 const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_MAX_ATTEMPTS = 5;
@@ -350,7 +351,7 @@ const validateUpdateFormData = (data, originalSnapshot) => {
     if (!normaliseText(data[field])) errors.push(`${label} is required`);
   }
 
-  if (data.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) {
+  if (data.email && !validateEmail(data.email)) {
     errors.push('Invalid email format');
   }
   if (data.accountNumber && !/^\d+$/.test(data.accountNumber)) {

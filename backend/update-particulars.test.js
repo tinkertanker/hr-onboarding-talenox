@@ -128,6 +128,31 @@ test('unknown NRIC returns the generic response after one bounded list request',
   assert.equal(known.emails.length, 1);
 });
 
+test('updates reject non-string and oversized emails without consuming the verified session', async () => {
+  const runtimeState = createRuntime(makeEmployee());
+  const verified = await requestAndVerify(runtimeState);
+  const callsBeforeValidation = runtimeState.calls.length;
+  for (const email of [
+    'a'.repeat(243) + '@example.com',
+    ['alex@example.com'],
+    'a@' + '.'.repeat(20000) + ' '
+  ]) {
+    const result = parseResult(await updateParticulars.handler(makeEvent({
+      ...verified.particulars, updateToken: verified.updateToken, email
+    })));
+    assert.equal(result.status, 400);
+    assert.ok(result.body.details.includes('Invalid email format'));
+    assert.equal(runtimeState.calls.length, callsBeforeValidation);
+  }
+  const email = 'a'.repeat(242) + '@example.com';
+  const result = parseResult(await updateParticulars.handler(makeEvent({
+    ...verified.particulars, updateToken: verified.updateToken, email
+  })));
+  assert.equal(result.status, 200);
+  const put = runtimeState.calls.find((call) => call.options.method === 'PUT');
+  assert.deepEqual(JSON.parse(put.options.body), { employee: { email } });
+});
+
 test('OTP verification is single-use and returns only a safe editable snapshot', async () => {
   const runtimeState = createRuntime(makeEmployee());
   const verified = await requestAndVerify(runtimeState);

@@ -62,3 +62,43 @@ test('Express rejects malformed and oversized JSON without logging request conte
   await closed;
   assert.ok(!output.includes(syntheticNric), 'Parser errors must not echo the request body');
 });
+
+test('mock provider logs omit email subjects and their control characters', { timeout: 5000 }, async (t) => {
+  const reservation = net.createServer().listen(0, '127.0.0.1');
+  await once(reservation, 'listening');
+  const port = reservation.address().port;
+  await new Promise((resolve) => reservation.close(resolve));
+
+  const child = spawn(process.execPath, ['scripts/mock-providers.js'], {
+    cwd: path.resolve(__dirname, '..'),
+    env: { ...process.env, MOCK_PROVIDERS_PORT: String(port) },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  const closed = once(child, 'close');
+  t.after(async () => { child.kill(); await closed; });
+  let output = '';
+  child.stderr.on('data', (chunk) => { output += chunk; });
+  await new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('exit', () => reject(new Error('Mock provider exited before becoming ready')));
+    child.stdout.on('data', (chunk) => {
+      output += chunk;
+      if (output.includes(`127.0.0.1:${port}`)) resolve();
+    });
+  });
+  const subject = 'Synthetic subject\r\nFORGED RECORD\x1b[2J';
+  const response = await fetch(`http://127.0.0.1:${port}/emails`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ subject })
+  });
+  assert.equal(response.status, 200);
+  const calls = await (await fetch(`http://127.0.0.1:${port}/__calls`)).json();
+  assert.equal(calls[0].body.subject, subject, 'Synthetic payload remains available for local inspection');
+  child.kill();
+  await closed;
+  assert.match(output, /POST \/emails/);
+  for (const value of ['Synthetic subject', 'FORGED RECORD', '\r', '\x1b']) {
+    assert.ok(!output.includes(value), 'Operational logs must not print email content');
+  }
+});
