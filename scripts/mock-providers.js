@@ -39,7 +39,7 @@ http.createServer((req, res) => {
     let body = null;
     try { body = raw ? JSON.parse(raw) : null; } catch { return send(res, 400, { error: 'bad json' }); }
     calls.push({ method: req.method, path: pathname, body });
-    console.log(req.method, pathname, body && body.subject ? `"${body.subject}"` : '');
+    console.log(req.method, pathname);
 
     if (pathname === '/emails' && req.method === 'POST') {
       return send(res, 200, { id: `mock_email_${calls.length}` });

@@ -2,6 +2,7 @@
 
 // Initialize Resend for email notifications
 const { Resend } = require('resend');
+const validateEmail = require('./validate-email');
 
 const sendEmailOrThrow = async (resend, payload) => {
   const result = await resend.emails.send(payload);
@@ -50,8 +51,7 @@ const validateFormData = (data) => {
   }
   
   // Validate email format
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (data.email && !emailRegex.test(data.email)) {
+  if (data.email && !validateEmail(data.email)) {
     errors.push('Invalid email format');
   }
   
